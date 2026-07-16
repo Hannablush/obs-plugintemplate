@@ -81,7 +81,15 @@ struct FilterData {
     std::string backend_key;
     std::atomic<std::int64_t> ai_interval_ns{83'333'333};
     std::atomic<std::int64_t> last_submit_ns{0};
+    std::atomic<std::uint64_t> raw_frames_seen{0};
+    std::atomic<std::uint64_t> submitted_frames{0};
+    std::atomic<std::uint64_t> conversion_failures{0};
+    std::atomic<std::uint64_t> uploaded_masks{0};
+    std::atomic<bool> first_raw_frame_logged{false};
+    std::atomic<bool> first_mask_logged{false};
     std::uint64_t uploaded_sequence = 0;
+    std::int64_t last_health_log_ns = 0;
+    std::string last_status_message;
 };
 
 static std::wstring utf8_to_wide(const char* text)
@@ -211,6 +219,20 @@ static ai::InferenceBackend parse_backend(const char* value)
     return ai::InferenceBackend::Auto;
 }
 
+static const char* video_format_name(video_format format)
+{
+    switch (format) {
+    case VIDEO_FORMAT_BGRA: return "BGRA";
+    case VIDEO_FORMAT_BGRX: return "BGRX";
+    case VIDEO_FORMAT_RGBA: return "RGBA";
+    case VIDEO_FORMAT_BGR3: return "BGR3";
+    case VIDEO_FORMAT_NV12: return "NV12";
+    case VIDEO_FORMAT_I420: return "I420";
+    case VIDEO_FORMAT_YUY2: return "YUY2";
+    default: return "unsupported";
+    }
+}
+
 static void start_ai(FilterData* filter, const std::string& backend_key, ai::InferenceBackend backend, float stability)
 {
     char* detector_path = obs_module_file("models/face_detection_yunet_2023mar.onnx");
@@ -220,10 +242,17 @@ static void start_ai(FilterData* filter, const std::string& backend_key, ai::Inf
     config.parser_model = utf8_to_wide(parser_path);
     config.backend = backend;
     config.stability = stability;
+
+    blog(LOG_INFO,
+         "[BaddieCam BeautyCore AI] starting AI backend=%s detector=%s parser=%s",
+         backend_key.c_str(), detector_path ? detector_path : "(missing)",
+         parser_path ? parser_path : "(missing)");
+
     bfree(detector_path);
     bfree(parser_path);
     filter->backend_key = backend_key;
     filter->backend = backend;
+    filter->last_status_message.clear();
     filter->ai.start(std::move(config));
 }
 
@@ -296,14 +325,34 @@ static void update_mask_texture(gs_texture_t*& texture, const ai::RgbaMask& mask
     }
 }
 
-static void upload_latest_masks(FilterData* filter)
+static bool upload_latest_masks(FilterData* filter)
 {
     ai::RgbaMask mask;
     ai::RgbaMask glam;
     if (!filter->ai.get_latest_masks(mask, glam, filter->uploaded_sequence))
-        return;
+        return false;
+
     update_mask_texture(filter->mask_texture, mask);
     update_mask_texture(filter->glam_texture, glam);
+    const auto count = filter->uploaded_masks.fetch_add(1) + 1;
+
+    if (!filter->first_mask_logged.exchange(true)) {
+        std::uint8_t max_skin = 0;
+        std::uint8_t max_confidence = 0;
+        for (std::size_t i = 0; i + 3 < mask.pixels.size(); i += 4) {
+            max_skin = std::max(max_skin, mask.pixels[i + 0]);
+            max_confidence = std::max(max_confidence, mask.pixels[i + 3]);
+        }
+        blog(LOG_INFO,
+             "[BaddieCam BeautyCore AI] first mask uploaded: %dx%d skin_max=%u confidence_max=%u sequence=%llu",
+             mask.width, mask.height, static_cast<unsigned>(max_skin),
+             static_cast<unsigned>(max_confidence),
+             static_cast<unsigned long long>(filter->uploaded_sequence));
+    } else if ((count % 120) == 0) {
+        blog(LOG_DEBUG, "[BaddieCam BeautyCore AI] uploaded %llu masks",
+             static_cast<unsigned long long>(count));
+    }
+    return true;
 }
 
 } // namespace
@@ -338,6 +387,7 @@ void* filter_create(obs_data_t* settings, obs_source_t* source)
         delete filter;
         return nullptr;
     }
+    blog(LOG_INFO, "[BaddieCam BeautyCore AI] filter instance created; waiting for async camera frames");
     filter_update(filter, settings);
     return filter;
 }
@@ -467,7 +517,11 @@ obs_properties_t* filter_properties(void* data)
     if (filter) {
         const auto status = filter->ai.status();
         const std::string label = "AI STATUS: " + status.message +
-            " | inference " + std::to_string(static_cast<int>(std::lround(status.inference_ms))) + " ms";
+            " | inference " + std::to_string(static_cast<int>(std::lround(status.inference_ms))) + " ms" +
+            " | raw frames " + std::to_string(filter->raw_frames_seen.load()) +
+            " | submitted " + std::to_string(filter->submitted_frames.load()) +
+            " | processed " + std::to_string(status.processed_frames) +
+            " | masks " + std::to_string(filter->uploaded_masks.load());
         obs_properties_add_text(ai_group, "ai_runtime_status", label.c_str(), OBS_TEXT_INFO);
     }
     obs_properties_add_group(props, "ai_controls", "AUTOMATIC AI MASK ENGINE",
@@ -480,16 +534,63 @@ obs_source_frame* filter_video(void* data, obs_source_frame* frame)
     auto* filter = static_cast<FilterData*>(data);
     if (!filter || !frame)
         return frame;
+
+    filter->raw_frames_seen.fetch_add(1);
+    if (!filter->first_raw_frame_logged.exchange(true)) {
+        blog(LOG_INFO,
+             "[BaddieCam BeautyCore AI] first raw frame received: %ux%u format=%s timestamp=%llu",
+             frame->width, frame->height, video_format_name(frame->format),
+             static_cast<unsigned long long>(frame->timestamp));
+    }
+
     const std::int64_t now = now_ns();
     std::int64_t last = filter->last_submit_ns.load();
     if (now - last < filter->ai_interval_ns.load())
         return frame;
     if (!filter->last_submit_ns.compare_exchange_strong(last, now))
         return frame;
+
     ai::RgbImage ai_frame = make_ai_frame(frame);
-    if (ai_frame.valid())
+    if (ai_frame.valid()) {
+        filter->submitted_frames.fetch_add(1);
         filter->ai.submit(std::move(ai_frame), frame->timestamp);
+    } else {
+        const auto failures = filter->conversion_failures.fetch_add(1) + 1;
+        if (failures == 1 || (failures % 60) == 0) {
+            blog(LOG_WARNING,
+                 "[BaddieCam BeautyCore AI] could not convert camera frame format=%s; failures=%llu",
+                 video_format_name(frame->format),
+                 static_cast<unsigned long long>(failures));
+        }
+    }
     return frame;
+}
+
+void filter_tick(void* data, float)
+{
+    auto* filter = static_cast<FilterData*>(data);
+    if (!filter)
+        return;
+
+    const auto status = filter->ai.status();
+    const std::int64_t now = now_ns();
+    const bool status_changed = status.message != filter->last_status_message;
+    const bool health_due = now - filter->last_health_log_ns >= 2'000'000'000LL;
+
+    if (status_changed || health_due) {
+        filter->last_status_message = status.message;
+        filter->last_health_log_ns = now;
+        blog(status.ready ? LOG_INFO : LOG_WARNING,
+             "[BaddieCam BeautyCore AI] status=%s raw=%llu submitted=%llu processed=%llu dropped=%llu masks=%llu inference=%.1fms",
+             status.message.c_str(),
+             static_cast<unsigned long long>(filter->raw_frames_seen.load()),
+             static_cast<unsigned long long>(filter->submitted_frames.load()),
+             static_cast<unsigned long long>(status.processed_frames),
+             static_cast<unsigned long long>(status.dropped_frames),
+             static_cast<unsigned long long>(filter->uploaded_masks.load()),
+             status.inference_ms);
+        obs_source_update_properties(filter->context);
+    }
 }
 
 void filter_render(void* data, gs_effect_t*)
@@ -509,7 +610,7 @@ void filter_render(void* data, gs_effect_t*)
     if (!obs_source_process_filter_begin(filter->context, GS_RGBA, OBS_NO_DIRECT_RENDERING))
         return;
 
-    upload_latest_masks(filter);
+    (void)upload_latest_masks(filter);
     RenderSettings s;
     {
         std::scoped_lock lock(filter->settings_mutex);

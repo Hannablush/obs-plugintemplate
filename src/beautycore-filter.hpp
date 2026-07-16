@@ -11,6 +11,7 @@ void filter_update(void* data, obs_data_t* settings);
 void filter_defaults(obs_data_t* settings);
 obs_properties_t* filter_properties(void* data);
 obs_source_frame* filter_video(void* data, obs_source_frame* frame);
+void filter_tick(void* data, float seconds);
 void filter_render(void* data, gs_effect_t* effect);
 
 } // namespace baddiecam
