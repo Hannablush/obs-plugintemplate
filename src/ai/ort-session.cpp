@@ -5,6 +5,7 @@
 #include <exception>
 #include <functional>
 #include <numeric>
+#include <sstream>
 
 #ifdef BADDIECAM_WITH_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
@@ -17,7 +18,10 @@ namespace baddiecam::ai {
 
 struct OrtSession::Impl {
 #ifdef BADDIECAM_WITH_ONNXRUNTIME
-    Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "BaddieCamBeautyCoreAI"};
+    // Do not construct Ort::Env in the filter object's constructor.
+    // OBS can have a different onnxruntime.dll left by another plug-in.
+    // We validate the loaded C API first and only then create the Env.
+    std::unique_ptr<Ort::Env> env;
     std::unique_ptr<Ort::Session> session;
     std::vector<std::string> input_names_owned;
     std::vector<const char*> input_names;
@@ -39,14 +43,58 @@ bool OrtSession::load(const std::wstring& model_path, InferenceBackend backend, 
     return false;
 #else
     impl_->session.reset();
+    impl_->env.reset();
     impl_->input_names_owned.clear();
     impl_->input_names.clear();
     impl_->output_names_owned.clear();
     impl_->output_names.clear();
     impl_->directml = false;
 
+    // CRASH FIX:
+    // Ort::Env dereferences OrtGetApiBase()->GetApi(ORT_API_VERSION).
+    // If OBS loaded an older onnxruntime.dll, GetApi can return nullptr.
+    // Check it explicitly before any C++ wrapper object is constructed.
+    const OrtApiBase* api_base = OrtGetApiBase();
+    if (api_base == nullptr) {
+        error = "ONNX Runtime could not provide its API base. The runtime DLL is missing or damaged.";
+        return false;
+    }
+
+    const char* runtime_version = api_base->GetVersionString();
+    const OrtApi* compatible_api = api_base->GetApi(ORT_API_VERSION);
+    if (compatible_api == nullptr) {
+        std::ostringstream message;
+        message << "Incompatible onnxruntime.dll";
+        if (runtime_version && *runtime_version)
+            message << " (loaded version " << runtime_version << ")";
+        message << ". BeautyCore AI 2.0.1 requires the runtime packaged with its Windows artifact.";
+        error = message.str();
+        return false;
+    }
+
+    try {
+        impl_->env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "BaddieCamBeautyCoreAI");
+    } catch (const Ort::Exception& e) {
+        error = std::string("Could not initialize ONNX Runtime: ") + e.what();
+        impl_->env.reset();
+        return false;
+    } catch (const std::exception& e) {
+        error = std::string("Could not initialize ONNX Runtime: ") + e.what();
+        impl_->env.reset();
+        return false;
+    } catch (...) {
+        error = "Could not initialize ONNX Runtime because an unknown native error occurred.";
+        impl_->env.reset();
+        return false;
+    }
+
     auto create_session = [&](bool request_directml, std::string& attempt_error) -> bool {
         try {
+            if (!impl_->env) {
+                attempt_error = "ONNX Runtime environment is not initialized.";
+                return false;
+            }
+
             Ort::SessionOptions options;
             options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
             options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
@@ -71,7 +119,7 @@ bool OrtSession::load(const std::wstring& model_path, InferenceBackend backend, 
             }
 #endif
 
-            auto session = std::make_unique<Ort::Session>(impl_->env, model_path.c_str(), options);
+            auto session = std::make_unique<Ort::Session>(*impl_->env, model_path.c_str(), options);
             Ort::AllocatorWithDefaultOptions allocator;
             std::vector<std::string> inputs;
             std::vector<std::string> outputs;
@@ -99,6 +147,8 @@ bool OrtSession::load(const std::wstring& model_path, InferenceBackend backend, 
             attempt_error = e.what();
         } catch (const std::exception& e) {
             attempt_error = e.what();
+        } catch (...) {
+            attempt_error = "unknown native session-creation error";
         }
         impl_->session.reset();
         impl_->input_names_owned.clear();
@@ -140,14 +190,16 @@ bool OrtSession::run(const std::vector<float>& input, const std::vector<std::int
         return false;
     }
     try {
-        const std::int64_t expected = std::accumulate(shape.begin(), shape.end(), std::int64_t{1}, std::multiplies<>());
+        const std::int64_t expected =
+            std::accumulate(shape.begin(), shape.end(), std::int64_t{1}, std::multiplies<>());
         if (expected <= 0 || static_cast<std::size_t>(expected) != input.size()) {
             error = "Input tensor size does not match its shape.";
             return false;
         }
         Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        Ort::Value tensor = Ort::Value::CreateTensor<float>(memory, const_cast<float*>(input.data()), input.size(),
-                                                            shape.data(), shape.size());
+        Ort::Value tensor =
+            Ort::Value::CreateTensor<float>(memory, const_cast<float*>(input.data()), input.size(),
+                                            shape.data(), shape.size());
         auto values = impl_->session->Run(Ort::RunOptions{nullptr}, impl_->input_names.data(), &tensor, 1,
                                           impl_->output_names.data(), impl_->output_names.size());
         outputs.clear();
@@ -159,6 +211,10 @@ bool OrtSession::run(const std::vector<float>& input, const std::vector<std::int
             const auto tensor_shape = info.GetShape();
             const std::size_t count = info.GetElementCount();
             const float* data = values[i].GetTensorData<float>();
+            if (data == nullptr && count != 0) {
+                error = "ONNX Runtime returned a null tensor buffer.";
+                return false;
+            }
             TensorOutput out;
             out.name = i < impl_->output_names_owned.size() ? impl_->output_names_owned[i] : "output";
             out.shape = tensor_shape;
@@ -170,6 +226,8 @@ bool OrtSession::run(const std::vector<float>& input, const std::vector<std::int
         error = e.what();
     } catch (const std::exception& e) {
         error = e.what();
+    } catch (...) {
+        error = "Unknown native inference error.";
     }
     return false;
 #endif

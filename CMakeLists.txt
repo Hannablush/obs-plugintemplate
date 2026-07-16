@@ -88,11 +88,20 @@ set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_nam
 
 if(WIN32)
   foreach(_dll onnxruntime.dll DirectML.dll onnxruntime_providers_shared.dll)
-    if(EXISTS "${ORT_ROOT}/runtimes/win-x64/native/${_dll}")
+    set(_runtime_file "${ORT_ROOT}/runtimes/win-x64/native/${_dll}")
+    if(EXISTS "${_runtime_file}")
+      # Copy beside the module for local/rundir testing.
       add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${ORT_ROOT}/runtimes/win-x64/native/${_dll}"
+          "${_runtime_file}"
           "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${_dll}")
+
+      # IMPORTANT: the official OBS template packages the CMake install tree,
+      # not arbitrary POST_BUILD files. This install rule makes the matching
+      # runtime part of the Windows GitHub Actions artifact.
+      install(FILES "${_runtime_file}"
+        DESTINATION "${CMAKE_PROJECT_NAME}/bin/64bit"
+        COMPONENT Runtime)
     endif()
   endforeach()
 endif()

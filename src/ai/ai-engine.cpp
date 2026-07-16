@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <utility>
 
 namespace baddiecam::ai {
@@ -92,7 +93,8 @@ void AiEngine::set_status(std::string message, bool ready, bool directml, float 
 
 void AiEngine::worker_main()
 {
-    std::string error;
+    try {
+        std::string error;
     if (!detector_.load(config_.detector_model, config_.backend, error)) {
         set_status("Face detector failed: " + error, false, false);
         return;
@@ -125,6 +127,11 @@ void AiEngine::worker_main()
             status_.inference_ms = ms;
             ++status_.processed_frames;
         }
+    }
+    } catch (const std::exception& e) {
+        set_status(std::string("AI worker stopped safely: ") + e.what(), false, false);
+    } catch (...) {
+        set_status("AI worker stopped safely after an unknown native error.", false, false);
     }
 }
 

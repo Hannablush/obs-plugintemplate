@@ -38,8 +38,8 @@
   },
   "name": "baddiecam-beautycore-ai",
   "displayName": "BaddieCam BeautyCore AI",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": "HannaBlush / BaddieCam",
-  "website": "https://github.com/obsproject/obs-plugintemplate",
+  "website": "https://github.com/Hannablush/obs-plugintemplate",
   "email": ""
 }
