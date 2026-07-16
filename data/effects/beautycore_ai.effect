@@ -1,0 +1,243 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform texture2d mask_image;
+uniform texture2d glam_image;
+
+uniform float2 texel_step;
+uniform float master_beauty;
+uniform float skin_smoothing;
+uniform float pore_refinement;
+uniform float blemish_evening;
+uniform float detail_restore;
+uniform float complexion_perfect;
+uniform float under_eye_perfect;
+uniform float shine_control;
+uniform float glass_skin;
+uniform float eye_hair_crisp;
+uniform float eye_brighten;
+uniform float lip_polish;
+uniform float doll_blush;
+uniform float facial_light;
+uniform float rosy_tone;
+uniform float warmth;
+uniform float mask_strength;
+uniform int quality_mode;
+uniform int preview_mode;
+
+sampler_state textureSampler {
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+sampler_state maskSampler {
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+struct VertData {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+    VertData vert_out;
+    vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+    vert_out.uv = v_in.uv;
+    return vert_out;
+}
+
+float luma(float3 c)
+{
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
+}
+
+float4 bilateralTap(float2 uv, float2 offset, float3 center, float spatial, float sigma)
+{
+    float3 c = image.Sample(textureSampler, uv + offset).rgb;
+    float3 d = c - center;
+    float w = spatial * exp(-dot(d, d) / max(sigma * sigma, 0.00001));
+    return float4(c * w, w);
+}
+
+float3 smoothFine(float2 uv, float3 center, float radius, float sigma)
+{
+    float2 p = texel_step * radius;
+    float4 a = float4(center * 2.8, 2.8);
+    a += bilateralTap(uv, float2( p.x, 0.0), center, 1.00, sigma);
+    a += bilateralTap(uv, float2(-p.x, 0.0), center, 1.00, sigma);
+    a += bilateralTap(uv, float2(0.0,  p.y), center, 1.00, sigma);
+    a += bilateralTap(uv, float2(0.0, -p.y), center, 1.00, sigma);
+    a += bilateralTap(uv, float2( p.x,  p.y), center, 0.72, sigma);
+    a += bilateralTap(uv, float2(-p.x,  p.y), center, 0.72, sigma);
+    a += bilateralTap(uv, float2( p.x, -p.y), center, 0.72, sigma);
+    a += bilateralTap(uv, float2(-p.x, -p.y), center, 0.72, sigma);
+    return a.rgb / max(a.a, 0.0001);
+}
+
+float3 smoothCoarse(float2 uv, float3 center, float radius, float sigma)
+{
+    float2 p = texel_step * radius;
+    float4 a = float4(center * 2.3, 2.3);
+    a += bilateralTap(uv, float2( p.x, 0.0), center, 0.90, sigma);
+    a += bilateralTap(uv, float2(-p.x, 0.0), center, 0.90, sigma);
+    a += bilateralTap(uv, float2(0.0,  p.y), center, 0.90, sigma);
+    a += bilateralTap(uv, float2(0.0, -p.y), center, 0.90, sigma);
+    a += bilateralTap(uv, float2( p.x,  p.y), center, 0.58, sigma);
+    a += bilateralTap(uv, float2(-p.x,  p.y), center, 0.58, sigma);
+    a += bilateralTap(uv, float2( p.x, -p.y), center, 0.58, sigma);
+    a += bilateralTap(uv, float2(-p.x, -p.y), center, 0.58, sigma);
+
+    if (quality_mode >= 1) {
+        float2 q = p * 1.65;
+        a += bilateralTap(uv, float2( q.x, 0.0), center, 0.34, sigma);
+        a += bilateralTap(uv, float2(-q.x, 0.0), center, 0.34, sigma);
+        a += bilateralTap(uv, float2(0.0,  q.y), center, 0.34, sigma);
+        a += bilateralTap(uv, float2(0.0, -q.y), center, 0.34, sigma);
+    }
+    if (quality_mode >= 2) {
+        float2 q = p * 2.15;
+        a += bilateralTap(uv, float2( q.x,  q.y), center, 0.22, sigma);
+        a += bilateralTap(uv, float2(-q.x,  q.y), center, 0.22, sigma);
+        a += bilateralTap(uv, float2( q.x, -q.y), center, 0.22, sigma);
+        a += bilateralTap(uv, float2(-q.x, -q.y), center, 0.22, sigma);
+    }
+    return a.rgb / max(a.a, 0.0001);
+}
+
+float4 PSBeauty(VertData v_in) : TARGET
+{
+    float2 uv = v_in.uv;
+    float4 raw4 = image.Sample(textureSampler, uv);
+    float3 raw = raw4.rgb;
+    float4 m = mask_image.Sample(maskSampler, uv);
+    float4 gm = glam_image.Sample(maskSampler, uv);
+
+    float trusted = saturate(m.a * mask_strength);
+    float skin = saturate(m.r * trusted);
+    float protect = saturate(m.g * trusted);
+    float underEye = saturate(m.b * trusted);
+    float cheekZone = saturate(gm.r * trusted);
+    float lipZone = saturate(gm.g * trusted);
+    float eyeZone = saturate(gm.b * trusted);
+    float tZone = saturate(gm.a * trusted);
+
+    if (preview_mode == 1)
+        return float4(lerp(raw, float3(1.0, 0.20, 0.62), skin * 0.82), raw4.a);
+    if (preview_mode == 2)
+        return float4(lerp(raw, float3(0.12, 0.62, 1.0), protect * 0.90), raw4.a);
+    if (preview_mode == 3)
+        return float4(lerp(raw, float3(0.35, 1.0, 0.75), underEye * 0.92), raw4.a);
+    if (preview_mode == 4)
+        return float4(trusted, trusted, trusted, raw4.a);
+    if (preview_mode == 5)
+        return float4(saturate(cheekZone + lipZone), saturate(eyeZone + tZone * 0.45), saturate(tZone + lipZone * 0.35), raw4.a);
+
+    if (master_beauty <= 0.0001 || trusted <= 0.0001)
+        return raw4;
+
+    float edgeAllow = 1.0 - protect;
+    float allowedSkin = skin * edgeAllow;
+    float sigma = lerp(0.052, 0.205, saturate(0.55 * skin_smoothing + 0.45 * blemish_evening));
+    float fineRadius = lerp(0.75, 2.8, pore_refinement);
+    float coarseRadius = lerp(1.8, 6.4, skin_smoothing);
+
+    float3 fine = smoothFine(uv, raw, fineRadius, sigma * 0.82);
+    float3 coarse = smoothCoarse(uv, raw, coarseRadius, sigma);
+    float rawY = luma(raw);
+    float fineY = luma(fine);
+    float coarseY = luma(coarse);
+    float3 featureDetail = raw - fine;
+
+    float3 poreLayer = lerp(raw, fine, pore_refinement * 0.74);
+    float3 smoothBase = lerp(poreLayer, coarse, skin_smoothing * 0.82);
+
+    // Bring back controlled luminance detail without restoring most chroma blotchiness.
+    float restoredY = rawY - lerp(fineY, coarseY, 0.58);
+    smoothBase += restoredY * detail_restore;
+
+    float localDifference = length(raw - coarse);
+    float blemishGate = smoothstep(0.010, 0.125, localDifference);
+    float smoothAmount = master_beauty * allowedSkin * saturate(0.34 + 0.66 * skin_smoothing);
+    smoothAmount *= 1.0 + blemish_evening * blemishGate * 0.34;
+
+    float3 outc = lerp(raw, smoothBase, saturate(smoothAmount));
+
+    // Complexion perfect: preserve luminance, calm patchy chroma, gently lift mids.
+    float outY = luma(outc);
+    float3 neutral = float3(outY, outY, outY);
+    float mid = smoothstep(0.10, 0.42, outY) * (1.0 - smoothstep(0.78, 0.98, outY));
+    float comp = complexion_perfect * master_beauty * skin;
+    outc = lerp(outc, neutral + (outc - neutral) * 0.86, comp * 0.58);
+    outc += (1.0 - outc) * comp * mid * float3(0.030, 0.024, 0.028);
+
+    // Blemish/redness evening is chroma-focused rather than a global pale wash.
+    float redness = max(outc.r - 0.5 * (outc.g + outc.b), 0.0);
+    float redGate = smoothstep(0.012, 0.16, redness);
+    float y2 = luma(outc);
+    float3 neutral2 = float3(y2, y2, y2);
+    outc = lerp(outc, neutral2 + (outc - neutral2) * 0.78,
+                blemish_evening * skin * redGate * 0.48);
+
+    // Automatically generated under-eye mask from parsed eye regions.
+    float ue = under_eye_perfect * master_beauty * underEye;
+    float dark = 1.0 - smoothstep(0.28, 0.62, rawY);
+    outc = lerp(outc, coarse, ue * 0.23);
+    outc += (1.0 - outc) * ue * (0.025 + dark * 0.052);
+
+    // Automatically tracked Meitu-style finishing zones from semantic parsing.
+    float rawMax = max(raw.r, max(raw.g, raw.b));
+    float rawMin = min(raw.r, min(raw.g, raw.b));
+    float rawSat = rawMax - rawMin;
+    float eyeWhiteGate = (1.0 - smoothstep(0.08, 0.30, rawSat)) * smoothstep(0.20, 0.82, rawY);
+    outc += (1.0 - outc) * eye_brighten * eyeZone * eyeWhiteGate * 0.20;
+    outc += featureDetail * eye_brighten * eyeZone * 0.34;
+
+    float lipRed = max(raw.r - 0.5 * (raw.g + raw.b), 0.0);
+    float lipGate = 0.48 + 0.52 * smoothstep(-0.01, 0.15, lipRed);
+    outc += lipZone * lip_polish * lipGate * float3(0.050, -0.013, 0.026);
+    float polishedY = luma(outc);
+    outc = lerp(outc, float3(polishedY, polishedY, polishedY) +
+                       (outc - float3(polishedY, polishedY, polishedY)) * 1.08,
+                       lipZone * lip_polish * 0.38);
+
+    outc += cheekZone * doll_blush * float3(0.036, -0.006, 0.018);
+    outc += (1.0 - outc) * tZone * facial_light * mid * float3(0.022, 0.018, 0.021);
+
+    // Safe skin highlight compression; no unstable shadow division.
+    float beforeHiY = luma(outc);
+    float hi = smoothstep(0.58, 0.99, beforeHiY);
+    float afterHiY = max(0.0, beforeHiY - hi * hi * shine_control * skin * master_beauty * 0.072);
+    outc *= afterHiY / max(beforeHiY, 0.0001);
+
+    // Glass-skin sheen uses the filtered signal and remains local to trusted skin.
+    float3 glowSignal = max(coarse - 0.48, 0.0);
+    outc += glowSignal * glass_skin * skin * master_beauty * 0.075;
+    outc += (1.0 - outc) * glass_skin * skin * mid * master_beauty * float3(0.012, 0.010, 0.013);
+
+    // Protected regions receive controlled crispness instead of blur.
+    float2 p = texel_step * 1.2;
+    float3 micro = (image.Sample(textureSampler, uv + float2(p.x, 0)).rgb +
+                    image.Sample(textureSampler, uv - float2(p.x, 0)).rgb +
+                    image.Sample(textureSampler, uv + float2(0, p.y)).rgb +
+                    image.Sample(textureSampler, uv - float2(0, p.y)).rgb) * 0.25;
+    float3 microDetail = raw - micro;
+    float crispMask = saturate(protect + (1.0 - skin) * trusted * 0.35);
+    outc += microDetail * eye_hair_crisp * crispMask * 0.82;
+
+    outc += rosy_tone * skin * master_beauty * float3(0.025, -0.006, 0.014);
+    outc += warmth * skin * master_beauty * float3(0.028, 0.008, -0.023);
+
+    return float4(saturate(outc), raw4.a);
+}
+
+technique Draw
+{
+    pass
+    {
+        vertex_shader = VSDefault(v_in);
+        pixel_shader  = PSBeauty(v_in);
+    }
+}

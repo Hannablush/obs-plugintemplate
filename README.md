@@ -1,59 +1,33 @@
-# OBS Plugin Template
+# BaddieCam BeautyCore AI for OBS
 
-## Introduction
+A native Windows OBS video filter designed for automatic, face-aware webcam beauty processing without a separate beauty-camera application.
 
-The plugin template is meant to be used as a starting point for OBS Studio plugin development. It includes:
+## Non-negotiable design rules
 
-* Boilerplate plugin source code
-* A CMake project file
-* GitHub Actions workflows and repository actions
+- **No facial geometry or warping.** There is no eye enlargement, jaw slimming, nose shaping, or coordinate remapping.
+- **No manual face positioning.** A lightweight detector and semantic face parser create the masks automatically.
+- **Fail closed.** If AI confidence is poor, local beauty fades to the untouched camera instead of freezing stale masks.
+- **Protected identity detail.** Eyes, lashes, brows, lips, nostrils, hair, and hard edges are protected from skin blur.
+- **True zero.** Master Beauty at zero returns the original image.
+- **Local inference.** Models run on the user's PC through ONNX Runtime; frames are not sent to an online service.
 
-## Supported Build Environments
+## Processing pipeline
 
-| Platform  | Tool   |
-|-----------|--------|
-| Windows   | Visual Studio 17 2022 |
-| macOS     | XCode 16.0 |
-| Windows, macOS  | CMake 3.30.5 |
-| Ubuntu 24.04 | CMake 3.28.3 |
-| Ubuntu 24.04 | `ninja-build` |
-| Ubuntu 24.04 | `pkg-config`
-| Ubuntu 24.04 | `build-essential` |
+1. OBS supplies unmodified webcam frames to a small asynchronous AI queue.
+2. YuNet detects the most credible face.
+3. A 19-class face-parsing model labels skin, brows, eyes, nose, lips, hair, and background.
+4. The parser also creates automatic eye, lip, cheek, under-eye, and forehead/T-zone beauty masks.
+5. A motion-aware state machine rejects implausible jumps and stabilizes the masks.
+6. The latest masks are uploaded to the GPU.
+7. The OBS render filter applies multi-scale skin smoothing, pore refinement, complexion evening, under-eye balancing, shine control, and glass-skin finishing only where allowed by the AI mask.
 
-## Quick Start
+The AI mask can update at 8–15 FPS while the final OBS render remains at the scene frame rate.
 
-An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plugintemplate/wiki/Quick-Start-Guide) is available in the wiki.
+## Build status
 
-## Documentation
+This package is complete **source code**, build scripts, effects, a verified model downloader, tests, and documentation. It is not a precompiled DLL because this environment does not contain the Windows OBS SDK, Visual Studio, or a physical camera. Build through the official OBS plug-in template and GitHub Actions, then perform live camera QA before treating it as production-ready.
 
-All documentation can be found in the [Plugin Template Wiki](https://github.com/obsproject/obs-plugintemplate/wiki).
+On Windows, configuration verifies or downloads both pinned ONNX models by SHA-256. The overlay script also downloads them before the repository is committed, so the packaged artifact contains everything the runtime needs.
 
-Suggested reading to get up and running:
 
-* [Getting started](https://github.com/obsproject/obs-plugintemplate/wiki/Getting-Started)
-* [Build system requirements](https://github.com/obsproject/obs-plugintemplate/wiki/Build-System-Requirements)
-* [Build system options](https://github.com/obsproject/obs-plugintemplate/wiki/CMake-Build-System-Options)
-
-## GitHub Actions & CI
-
-Default GitHub Actions workflows are available for the following repository actions:
-
-* `push`: Run for commits or tags pushed to `master` or `main` branches.
-* `pr-pull`: Run when a Pull Request has been pushed or synchronized.
-* `dispatch`: Run when triggered by the workflow dispatch in GitHub's user interface.
-* `build-project`: Builds the actual project and is triggered by other workflows.
-* `check-format`: Checks CMake and plugin source code formatting and is triggered by other workflows.
-
-The workflows make use of GitHub repository actions (contained in `.github/actions`) and build scripts (contained in `.github/scripts`) which are not needed for local development, but might need to be adjusted if additional/different steps are required to build the plugin.
-
-### Retrieving build artifacts
-
-Successful builds on GitHub Actions will produce build artifacts that can be downloaded for testing. These artifacts are commonly simple archives and will not contain package installers or installation programs.
-
-### Building a Release
-
-To create a release, an appropriately named tag needs to be pushed to the `main`/`master` branch using semantic versioning (e.g., `12.3.4`, `23.4.5-beta2`). A draft release will be created on the associated repository with generated installer packages or installation programs attached as release artifacts.
-
-## Signing and Notarizing on macOS
-
-Basic concepts of codesigning and notarization on macOS are explained in the correspodning [Wiki article](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS) which has a specific section for the [GitHub Actions setup](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS#setting-up-code-signing-for-github-actions).
+Detector note: the pinned YuNet ONNX model uses its fixed 640 x 640 input layout; BaddieCam letterboxes frames without stretching before inference.
